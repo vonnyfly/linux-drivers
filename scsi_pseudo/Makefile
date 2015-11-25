@@ -1,5 +1,7 @@
-TARGET:=scsi_pseudo
-obj-m:=$(TARGET).o
+TARGET := my_scsi_pseudo
+obj-m += $(TARGET).o
+$(TARGET)-objs := ./scsi_pseudo_impl.o ./scsi_pseudo.o
+
 KDIR:=/lib/modules/$(shell uname -r)/build
 PWD:=$(shell pwd)
 
