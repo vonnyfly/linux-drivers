@@ -3,6 +3,21 @@
 
 #include "scsi_pseudo.h"
 
+int fill_from_dev_buffer(struct scsi_cmnd *scp, unsigned char *buf,
+        int buf_len);
+
+int fetch_to_dev_buffer(struct scsi_cmnd *scp, unsigned char *buf,
+             int buf_len);
+
+static const int check_condition_result =
+    (DRIVER_SENSE << 24) | SAM_STAT_CHECK_CONDITION;
+
+static const int illegal_condition_result =
+  (DRIVER_SENSE << 24) | (DID_ABORT << 16) | SAM_STAT_CHECK_CONDITION;
+
+static const int device_qfull_result =
+  (DID_OK << 16) | (COMMAND_COMPLETE << 8) | SAM_STAT_TASK_SET_FULL;
+
 struct sp_opcode_info_t *sp_opcode_arr[256] = {
   [S_TEST_UNIT_READY] = {&s_test_unit_ready},
   [S_REWIND] = {&s_rewind},
@@ -153,6 +168,7 @@ int
 s_test_unit_ready(struct scsi_cmnd *scp, struct sp_dev_info *sdp)
 {
   pr_info("\n");
+  mk_sense_buffer(scp, GOOD, NO_SENSE, 0);
   return 0;
 }
 
@@ -240,10 +256,49 @@ s_space_6(struct scsi_cmnd *scp, struct sp_dev_info *sdp)
   return 0;
 }
 
+static const char* inq_vendor_id = "Vonix";
+static const char* inq_product_id = "my_scsi_pseudo";
+static const char* inq_product_rev = "abcd";
 int
 s_inquiry(struct scsi_cmnd *scp, struct sp_dev_info *sdp)
 {
   pr_info("\n");
+  u8 *cmd = scp->cmnd;
+  u8 *buf;
+  int alloc_len;
+
+  alloc_len = (cmd[3] << 8) + cmd[4];
+  buf = kzalloc(584, GFP_ATOMIC);
+  /*
+  * If the SCSI target device is not capable of supporting a peripheral device
+  * connected to this logical unit, the device server shall set these fields to 7Fh
+  */
+  buf[0] = 0x7f;
+
+  if (0x1 & cmd[1]) {/* EVPD bit set*/
+    if (0 == cmd[2]) { /* PAGE CODE = 0 */
+    }
+    if (0x80 == cmd[2]) {/* PAGE CODE = 80 */
+
+    }
+  }
+  buf[1] = 0;
+  buf[2] = 0xff;
+  buf[3] = 0x2;
+  buf[4] = 0;
+  buf[5] = 0;
+  buf[6] = 0x10;
+  buf[7] = 0xa;
+  memcpy(&buf[8], inq_vendor_id, 8);
+  memcpy(&buf[16], inq_product_id, 16);
+  memcpy(&buf[32], inq_product_rev, 4);
+  /*version description(2 bytes each)*/
+  buf[58] = 0x0;buf[59] = 0xa2;/* SAM-5 rev 4 */
+  buf[60] = 0x0;buf[61] = 0x68;/* SPC-4 rev 37 */
+  buf[62] = 0x4; buf[63] = 0xc5; /* SBC-4 rev 36 */
+  buf[64] = 0x20; buf[65] = 0xe6;  /* SPL-3 rev 7 */
+  fill_from_dev_buffer(scp, buf, min(alloc_len, 584));
+  kfree(buf);
   return 0;
 }
 
@@ -922,8 +977,28 @@ s_service_action_out_16(struct scsi_cmnd *scp, struct sp_dev_info *sdp)
 int
 s_report_luns(struct scsi_cmnd *scp, struct sp_dev_info *sdp)
 {
+  int alloc_len;
+  u8 *cmd;
+  struct scsi_lun *lun_p;
+  u8 buf[256];
+  int num_luns = 5;
+  int i = 0;
+
   pr_info("\n");
-  return 0;
+
+  cmd = scp->cmnd;
+  alloc_len = (cmd[6] << 24) + (cmd[7] << 16) + (cmd[8] << 8) + cmd[9];
+  memset(buf, 0, sizeof(buf));
+
+  buf[3] = num_luns;// luns
+
+  lun_p = (struct scsi_lun*)&buf[8];
+
+  for (i = 0; i < num_luns; ++i) {
+    // lun_p[i].scsi_lun[0] = 0x00;
+    lun_p[i].scsi_lun[1] = 0xff;
+  }
+  return fill_from_dev_buffer(scp, buf, min(alloc_len, sizeof(buf)));
 }
 
 int
@@ -1431,3 +1506,57 @@ struct sp_opcode_info_t *sp_get_opcode_info(u8 cmd)
   }
 }
 
+int fill_from_dev_buffer(struct scsi_cmnd *scp, unsigned char *buf,
+        int buf_len)
+{
+  int len;
+  struct scsi_data_buffer *sdb = scsi_in(scp);
+
+  if (!sdb->length)
+    return 0;
+  if (!(scsi_bidi_cmnd(scp) || scp->sc_data_direction == DMA_FROM_DEVICE))
+    return (DID_ERROR << 16);
+
+  len = scsi_sg_copy_from_buffer(scp, buf, buf_len);
+  sdb->resid = scsi_bufflen(scp) - len;
+  return 0;
+}
+
+int fetch_to_dev_buffer(struct scsi_cmnd *scp, unsigned char *buf,
+             int buf_len)
+{
+  if (!scsi_bufflen(scp))
+    return 0;
+  if (!(scsi_bidi_cmnd(scp) || scp->sc_data_direction == DMA_TO_DEVICE))
+    return -1;
+
+  return scsi_sg_copy_to_buffer(scp, buf, buf_len);
+}
+
+int
+schedule_resp(struct scsi_cmnd *cmnd, struct sp_dev_info *sdp,
+        int scsi_result, int delta_jiff)
+{
+  pr_info("\n");
+  cmnd->result = scsi_result;
+  cmnd->scsi_done(cmnd);
+  return 0;
+}
+
+void mk_sense_buffer(struct scsi_cmnd *scp, int key, int asc, int asq)
+{
+  unsigned char *sbuff;
+  int scsi_pseudo_dsense = 0;
+  sbuff = scp->sense_buffer;
+  if (!sbuff) {
+    sdev_printk(KERN_ERR, scp->device,
+          "%s: sense_buffer is NULL\n", __func__);
+    return;
+  }
+  memset(sbuff, 0, SCSI_SENSE_BUFFERSIZE);
+
+  scsi_build_sense_buffer(scsi_pseudo_dsense, sbuff, key, asc, asq);
+
+  sdev_printk(KERN_INFO, scp->device,
+    "[sense_key,asc,ascq]: [0x%x,0x%x,0x%x]\n", key, asc, asq);
+}

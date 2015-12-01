@@ -209,11 +209,10 @@ scsi_pseudo_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *scp)
   sdev_printk(KERN_INFO, sdp, "cmd: %s\n", b);
 
   if (sp_opcode->pfp) {
-    (sp_opcode->pfp)(scp, devip);
+    (void)sp_opcode->pfp(scp, devip);
   }
 
-  return 0;
-  // return schedule_resp(scp, devip, 0, 0);
+  return schedule_resp(scp, devip, 0, 0);
 }
 ////////////////////////////////////////////////////////////////
 static int __init scsi_pseudo_init(void)

@@ -340,3 +340,6 @@ int s_volume_set_in(struct scsi_cmnd *, struct sp_dev_info *);
 int s_volume_set_out(struct scsi_cmnd *, struct sp_dev_info *);
 
 struct sp_opcode_info_t *sp_get_opcode_info(u8 cmd);
+int schedule_resp(struct scsi_cmnd *cmnd, struct sp_dev_info *sdp,
+        int scsi_result, int delta_jiff);
+void mk_sense_buffer(struct scsi_cmnd *scp, int key, int asc, int asq);
